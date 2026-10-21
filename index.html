@@ -67,9 +67,10 @@ td,th{padding:6px 4px;border-bottom:1px solid var(--line);text-align:left}
 <body>
 <div id="app"></div>
 <script>
-const VERSION='0.5';
+const VERSION='0.6';
 const RELEASES=[
- {v:VERSION,d:'2026-10-21',n:['표기 변경: Pool → 봉사참여자','텍스트·이미지 공유: 구역 아래 줄에 주소 표기','텍스트 공유 지도 링크를 짧은 주소로 변환(설정에서 사용 여부 선택, 실패 시 원래 주소 사용)']},
+ {v:VERSION,d:'2026-10-21',n:['Google 시트 연동(Apps Script): 전도인·지역·구역·계정·공유 설정을 모든 기기에서 공유','일자·시간대별 배정을 서버에 저장하고 불러오기','접속 로그를 서버에 기록(관리자 전용 조회)','비밀번호는 암호화(해시)해서 저장','설정에 데이터 연동 카드 추가(관리자 전용)']},
+ {v:'0.5',d:'2026-10-21',n:['표기 변경: Pool → 봉사참여자','텍스트·이미지 공유: 구역 아래 줄에 주소 표기','텍스트 공유 지도 링크를 짧은 주소로 변환(설정에서 사용 여부 선택, 실패 시 원래 주소 사용)']},
  {v:'0.4',d:'2026-10-21',n:['자동 배정: 형제를 먼저 배정하고 자매가 이어서 배정(팀 내 표시도 형제 → 자매 순)','텍스트 공유: 구역 앞에 📍 이모지, 구역 지도 링크 추가','설정: 공유 지도 링크 선택(네이버 / 다음 / 보내지 않음)','릴리즈 노트: 설정 우측 텍스트를 누르면 별도 페이지로 열림(관리자 전용)','전도인 리스트 정렬: 이름순(기본) / 등록순 / 형제·자매순']},
  {v:'0.3',d:'2026-10-21',n:['표기 변경: 남1→형제, 여2→자매','텍스트 공유: [1팀] 형식, 이름은 다음 행에 표기','이미지 공유: 남/여 표시 삭제','로그인 구조를 가두증거 구역배정과 동일하게 변경(계정 이름, 최초 로그인 시 비밀번호 변경, 비밀번호 변경·초기화, 접속 로그)','릴리즈 노트는 관리자 계정에만 표시, 우측 상단에서 버전 선택','팀별 구역 배정(설정 목록 선택 또는 직접 입력), 주소 입력 시 네이버/다음 지도 앱 연결','설정에 구역 설정 추가(관리자·사용자 공통)','버전은 v0.2에 이어 v0.3으로 표기, 생성 파일명은 preaching_assign_v버전_생성일자_생성시간 형식']},
  {v:'0.2',d:'2026-10-21',n:['공유 기능 추가: 텍스트 공유·복사, 이미지 공유·저장']},
@@ -83,7 +84,7 @@ let accounts=[{id:'admin',pw:'1234',name:'관리자',role:'admin',mustChange:fal
 let logs=[];
 let user=null,tab='assign',sel=[],lastG=1,loginErr='',pwErr='',relSel=RELEASES[0].v,toastT=null;
 
-function save(){try{localStorage.setItem(K,JSON.stringify({S,accounts,logs}))}catch(e){}}
+function save(){try{localStorage.setItem(K,JSON.stringify({S,accounts,logs}))}catch(e){}scheduleSync()}
 function load(){
  try{
   const d=JSON.parse(localStorage.getItem(K)||'null');
@@ -92,6 +93,7 @@ function load(){
   const u=localStorage.getItem(K+'_user');
   if(u)user=accounts.find(a=>a.id===u)||null;
  }catch(e){}
+ try{const c=JSON.parse(localStorage.getItem(K+'_sync')||'null');if(c){if(!CONF_URL)sync.url=c.url||'';if(!CONF_TOKEN)sync.token=c.token||''}}catch(e){}
  S.date=todayStr();
  if(!S.teams||!S.teams.length)S.teams=[[]];
  if(!S.zones)S.zones=[];
@@ -142,6 +144,176 @@ function zoneOf(i){
 function addLog(acc,ok,tried){
  logs.unshift({t:new Date().toISOString(),id:acc?acc.id:tried,name:acc?acc.name:'-',ok});
  logs=logs.slice(0,200);
+ if(syncOn()&&sync.ready)api({action:'log',id:acc?acc.id:tried,name:acc?acc.name:'-',ok}).catch(()=>{});
+}
+
+/* ---------- Google 시트 연동 (Apps Script) ---------- */
+const CONF_URL='https://script.google.com/macros/s/AKfycbxtqTAojlemejWqM2NLd4zZ-yhAHcFjObVnNV37sLFZx8JeUNE3T5vFGgghMMaoTtU7/exec';   // ← Apps Script 웹 앱 URL을 여기에 붙여넣으면 모든 기기에서 자동 연결됩니다
+const CONF_TOKEN='preachingassign2610212300'; // ← (선택) 스크립트 속성 TOKEN 과 같은 값
+let sync={url:CONF_URL,token:CONF_TOKEN,ready:false,msg:'',lastPull:0},showCfg=false,lastSent={},syncT=null;
+const syncOn=()=>!!sync.url;
+const nowStr=()=>new Date().toLocaleTimeString('ko-KR',{hour12:false});
+function setMsg(m){sync.msg=m;const el=document.getElementById('syncmsg');if(el)el.textContent=m}
+async function api(body){
+ const ctl=new AbortController(),to=setTimeout(()=>ctl.abort(),15000);
+ try{
+  const r=await fetch(sync.url,{method:'POST',body:JSON.stringify(Object.assign({token:sync.token},body)),signal:ctl.signal});
+  return await r.json();
+ }finally{clearTimeout(to)}
+}
+const masterData=()=>({roster:S.roster,regions:S.regions,zones:S.zones,accounts:accounts,settings:{shareMap:S.shareMap,shortLink:S.shortLink}});
+function applyMaster(k,v){
+ if(k==='roster'){S.roster=v;const ok=id=>S.roster.some(p=>p.id===id);S.checked=S.checked.filter(ok);S.teams=S.teams.map(t=>t.filter(ok));sel=sel.filter(ok)}
+ else if(k==='regions')S.regions=v;
+ else if(k==='zones')S.zones=v;
+ else if(k==='accounts'){accounts=v;if(user)user=accounts.find(a=>a.id===user.id)||null}
+ else if(k==='settings'){if(v.shareMap)S.shareMap=v.shareMap;if(v.shortLink!==undefined)S.shortLink=v.shortLink}
+}
+async function pull(){
+ if(!syncOn())return false;
+ try{
+  setMsg('서버에서 불러오는 중…');
+  const keys=Object.keys(masterData());
+  const r=await api({action:'get',keys});
+  if(!r.ok)throw new Error(r.error||'응답 오류');
+  for(const k of keys){
+   const raw=r.data&&r.data[k];
+   if(!raw)continue;
+   const cur=JSON.stringify(masterData()[k]);
+   if(lastSent[k]!==undefined&&lastSent[k]!==cur)continue;
+   applyMaster(k,JSON.parse(raw));
+   lastSent[k]=JSON.stringify(masterData()[k]);
+  }
+  sync.ready=true;sync.lastPull=Date.now();
+  ensureTz();
+  try{localStorage.setItem(K,JSON.stringify({S,accounts,logs}))}catch(e){}
+  setMsg('연결됨 · '+nowStr());
+  await pushChanged();
+  return true;
+ }catch(e){setMsg('연결 실패: '+(e&&e.message||e));return false}
+}
+async function pushChanged(){
+ if(!syncOn()||!sync.ready)return;
+ const m=masterData();
+ for(const k of Object.keys(m)){
+  const v=JSON.stringify(m[k]);
+  if(lastSent[k]===v)continue;
+  try{
+   const r=await api({action:'set',key:k,value:v});
+   if(r.ok){lastSent[k]=v;setMsg('저장됨 · '+nowStr())}else setMsg('저장 실패: '+(r.error||''));
+  }catch(e){setMsg('오프라인 — 연결되면 변경 사항을 다시 저장합니다')}
+ }
+}
+function scheduleSync(){if(!syncOn()||!sync.ready)return;clearTimeout(syncT);syncT=setTimeout(pushChanged,800)}
+async function syncSaveCfg(){
+ const u=document.getElementById('sy-url'),t=document.getElementById('sy-tk');
+ if(u&&!CONF_URL)sync.url=u.value.trim();
+ if(t&&!CONF_TOKEN)sync.token=t.value.trim();
+ try{localStorage.setItem(K+'_sync',JSON.stringify({url:sync.url,token:sync.token}))}catch(e){}
+ sync.ready=false;lastSent={};
+ if(!syncOn()){setMsg('연동을 해제했습니다');render();return}
+ const ok=await pull();toast(ok?'연동되었습니다':'연결에 실패했습니다');render();
+}
+async function syncTest(){
+ if(!syncOn()){toast('웹 앱 URL을 입력하세요');return}
+ try{const r=await api({action:'ping'});toast(r.ok?'연결 성공':'실패: '+(r.error||''))}catch(e){toast('연결 실패')}
+}
+async function syncForcePull(){lastSent={};const ok=await pull();toast(ok?'서버 데이터를 불러왔습니다':'불러오기 실패');render()}
+async function syncForcePush(){
+ if(!confirm('이 기기의 전도인·지역·구역·계정 데이터로 서버를 덮어쓸까요?'))return;
+ sync.ready=true;lastSent={};await pushChanged();toast('서버에 올렸습니다');
+}
+const aKey=()=>`assign:${S.date}:${S.slot}`;
+async function saveAssign(){
+ if(!syncOn()){toast('데이터 연동이 설정되지 않았습니다');return}
+ const v=JSON.stringify({region:S.region,teams:S.teams,tz:S.tz,checked:S.checked,mode:S.mode,by:user.name,at:new Date().toISOString()});
+ try{const r=await api({action:'set',key:aKey(),value:v});toast(r.ok?'서버에 저장했습니다':'저장 실패')}catch(e){toast('저장 실패: 연결을 확인하세요')}
+}
+async function loadAssign(){
+ if(!syncOn()){toast('데이터 연동이 설정되지 않았습니다');return}
+ try{
+  const r=await api({action:'get',keys:[aKey()]});
+  const raw=r.ok&&r.data&&r.data[aKey()];
+  if(!raw){toast('저장된 배정이 없습니다');return}
+  if(assigned().length&&!confirm('현재 배정을 불러온 배정으로 바꿀까요?'))return;
+  const d=JSON.parse(raw);
+  S.region=d.region||'';S.teams=(d.teams&&d.teams.length?d.teams:[[]]).map(t=>t.filter(id=>person(id)));
+  S.tz=d.tz||[];S.checked=(d.checked||[]).filter(id=>person(id));S.mode=d.mode||S.mode;
+  ensureTz();sel=[];save();render();toast('불러왔습니다'+(d.by?' ('+d.by+')':''));
+ }catch(e){toast('불러오기 실패: 연결을 확인하세요')}
+}
+async function syncLoadLogs(){
+ try{
+  const r=await api({action:'logs',limit:100});
+  if(!r.ok)throw new Error(r.error);
+  logs=r.rows.map(x=>({t:x[0],id:x[1],name:x[2],ok:x[3]===true}));
+  save();render();toast('서버 로그를 불러왔습니다');
+ }catch(e){toast('로그 불러오기 실패')}
+}
+function cfgInputs(){
+ return `${CONF_URL?'':`<div class="row" style="margin-top:8px"><input type="text" id="sy-url" placeholder="Apps Script 웹 앱 URL" value="${esc(sync.url)}" autocapitalize="off"></div>`}
+ ${CONF_TOKEN?'':`<div class="row" style="margin-top:6px"><input type="text" id="sy-tk" placeholder="토큰 (선택)" value="${esc(sync.token)}" autocapitalize="off"></div>`}
+ <div class="row" style="margin-top:6px"><button class="btn pri sm" data-act="ssave">저장·연결</button></div>`;
+}
+function syncCardHTML(){
+ return `<div class="card"><h2><span>데이터 연동 <span class="cnt">Google 시트 · 관리자 전용</span></span></h2>
+ <div class="hint">${syncOn()?(sync.ready?'연결됨':'연결 대기'):'미설정'} · 전도인·지역·구역·계정·공유 설정이 모든 기기에서 공유됩니다.</div>
+ ${cfgInputs()}
+ <div class="row" style="margin-top:8px"><button class="btn sm" data-act="stest">연결 테스트</button>
+ <button class="btn sm" data-act="spull">서버에서 새로 불러오기</button>
+ <button class="btn sm dan" data-act="spush">서버 덮어쓰기</button></div>
+ <div id="syncmsg" class="hint" style="margin-top:6px">${esc(sync.msg)}</div></div>`;
+}
+
+/* ---------- 계정 / 비밀번호(해시 저장) ---------- */
+async function hashPw(id,pw){
+ const str='gst|'+id+'|'+pw;
+ if(window.crypto&&crypto.subtle){
+  const b=await crypto.subtle.digest('SHA-256',new TextEncoder().encode(str));
+  return [...new Uint8Array(b)].map(x=>x.toString(16).padStart(2,'0')).join('');
+ }
+ let h1=0xdeadbeef,h2=0x41c6ce57;
+ for(let i=0;i<str.length;i++){const c=str.charCodeAt(i);h1=Math.imul(h1^c,2654435761);h2=Math.imul(h2^c,1597334677)}
+ h1=Math.imul(h1^(h1>>>16),2246822507)^Math.imul(h2^(h2>>>13),3266489909);
+ h2=Math.imul(h2^(h2>>>16),2246822507)^Math.imul(h1^(h1>>>13),3266489909);
+ return 'f'+(4294967296*(2097151&h2)+(h1>>>0)).toString(16);
+}
+async function migrateAccounts(){
+ for(const a of accounts){if(a.pw!==undefined){a.pwh=await hashPw(a.id,a.pw);delete a.pw}}
+}
+async function doLogin(){
+ const u=document.getElementById('lid').value.trim(),p=document.getElementById('lpw').value;
+ if(syncOn()&&!sync.ready)await pull();
+ const h=await hashPw(u,p);
+ const acc=accounts.find(x=>x.id===u&&x.pwh===h);
+ if(!acc){addLog(null,false,u||'(빈 값)');loginErr='아이디 또는 비밀번호가 올바르지 않습니다.';save();render();return}
+ addLog(acc,true);user=acc;loginErr='';pwErr='';tab='assign';
+ try{localStorage.setItem(K+'_user',acc.id)}catch(e){}
+ save();render();
+}
+async function doPwForce(){
+ const a1=document.getElementById('fp1').value,a2=document.getElementById('fp2').value;
+ let e=validPw(a1,a2);
+ const nh=await hashPw(user.id,a1);
+ if(!e&&nh===user.pwh)e='이전 비밀번호와 다른 비밀번호를 입력하세요.';
+ if(e){pwErr=e;render();return}
+ user.pwh=nh;user.mustChange=false;pwErr='';toast('비밀번호가 변경되었습니다');save();render();
+}
+async function doPwSelf(){
+ const c0=document.getElementById('cp0').value,a1=document.getElementById('cp1').value,a2=document.getElementById('cp2').value;
+ if(await hashPw(user.id,c0)!==user.pwh){toast('현재 비밀번호가 올바르지 않습니다');return}
+ const e=validPw(a1,a2);if(e){toast(e);return}
+ user.pwh=await hashPw(user.id,a1);toast('비밀번호가 변경되었습니다');save();render();
+}
+async function doPwReset(i){
+ const a=accounts[i];if(!a||!confirm(`"${a.name}" 계정의 비밀번호를 1234로 초기화할까요?\n다음 로그인 시 변경이 필요합니다.`))return;
+ a.pwh=await hashPw(a.id,'1234');a.mustChange=true;toast('초기화되었습니다');save();render();
+}
+async function doAddAcc(){
+ const n=document.getElementById('na').value.trim(),nm=document.getElementById('nn').value.trim(),p=document.getElementById('np').value.trim();
+ if(!n||!p||!nm){toast('아이디, 이름, 초기 비밀번호를 모두 입력하세요');return}
+ if(accounts.some(x=>x.id===n)){toast('이미 있는 아이디입니다');return}
+ accounts.push({id:n,pwh:await hashPw(n,p),name:nm,role:'user',mustChange:true});save();render();
 }
 
 /* ---------- 렌더링 ---------- */
@@ -163,7 +335,9 @@ function loginHTML(){
  <input type="password" id="lpw" placeholder="비밀번호" autocomplete="current-password" data-enter="login">
  <div class="err">${esc(loginErr)}</div>
  <button class="btn pri" style="width:100%" data-act="login">로그인</button>
- <p class="hint" style="text-align:center;margin:10px 0 0">v${VERSION}</p></div></div>`;
+ ${CONF_URL&&CONF_TOKEN?'':`<p class="hint" style="text-align:center;margin:10px 0 0"><a class="lnk" data-act="tcfg">데이터 연동 설정</a></p>`}
+ ${showCfg?cfgInputs():''}
+ <p class="hint" style="text-align:center;margin:10px 0 0">v${VERSION}${syncOn()?' · 연동 '+(sync.ready?'연결됨':'대기'):''}</p></div></div>`;
 }
 function forcePwHTML(){
  return `<div class="login"><div class="card">
@@ -245,6 +419,7 @@ function assignHTML(){
  <button class="btn sm pri" data-act="sharetext">텍스트 공유</button>
  <button class="btn sm" data-act="saveimg">이미지 저장</button>
  <button class="btn sm" data-act="copy">텍스트 복사</button></div>
+ ${syncOn()?`<div class="row" style="margin-bottom:6px"><button class="btn sm" data-act="asave">서버에 저장</button><button class="btn sm" data-act="aload">서버에서 불러오기</button><span class="hint">${esc(S.date)} ${S.slot} 기준</span></div>`:''}
  ${S.teams.map((t,i)=>{
   const m=t.filter(x=>gOf(x)!==2).length,f=t.length-m;
   return `<div class="team"><div class="hd"><b>${i+1}팀<span class="cnt">${t.length}명 · <span class="m-dot"></span> ${m} <span class="f-dot"></span> ${f}</span></b>
@@ -284,13 +459,14 @@ function settingsHTML(){
  <div class="row" style="margin-top:6px"><input type="password" id="cp1" placeholder="새 비밀번호 (4자 이상)"></div>
  <div class="row" style="margin-top:6px"><input type="password" id="cp2" placeholder="새 비밀번호 확인" data-enter="pwself"><button class="btn pri sm" data-act="pwself">변경</button></div></div>`;
  if(admin){
+  h+=syncCardHTML();
   h+=`<div class="card"><h2>계정 관리 <span class="cnt">관리자 전용</span></h2>
   <table>${accounts.map((a,i)=>`<tr><td><b>${esc(a.name)}</b> <span class="hint">${esc(a.id)} · ${a.role==='admin'?'관리자':'사용자'}${a.mustChange?' · 비번 변경 대기':''}</span></td>
   <td style="text-align:right">${a.id==='admin'?'':`<button class="btn sm" data-act="pwreset" data-i="${i}">비번 초기화</button> <button class="btn sm dan" data-act="delacc" data-i="${i}">삭제</button>`}</td></tr>`).join('')}</table>
   <div class="row" style="margin-top:10px"><input type="text" id="na" placeholder="아이디" autocapitalize="off"><input type="text" id="nn" placeholder="이름"></div>
   <div class="row" style="margin-top:6px"><input type="text" id="np" placeholder="초기 비밀번호" data-enter="addacc"><button class="btn pri sm" data-act="addacc">계정 추가</button></div>
   <div class="hint" style="margin-top:6px">추가·초기화된 계정은 최초 로그인 시 비밀번호를 반드시 변경해야 합니다.</div></div>`;
-  h+=`<div class="card"><h2><span>접속 로그 <span class="cnt">관리자 전용</span></span><button class="btn sm dan" data-act="clearlog" ${logs.length?'':'disabled'}>지우기</button></h2>
+  h+=`<div class="card"><h2><span>접속 로그 <span class="cnt">관리자 전용</span></span><span>${syncOn()?'<button class="btn sm" data-act="slogs">서버 로그</button> ':''}<button class="btn sm dan" data-act="clearlog" ${logs.length?'':'disabled'}>지우기</button></span></h2>
   ${logs.length?`<table class="log">${logs.slice(0,50).map(l=>`<tr><td>${esc(new Date(l.t).toLocaleString('ko-KR',{hour12:false}))}</td><td>${esc(l.name)} (${esc(l.id)})</td><td style="color:${l.ok?'#16a34a':'var(--danger)'}">${l.ok?'성공':'실패'}</td></tr>`).join('')}</table>`:'<div class="empty">접속 기록이 없습니다.</div>'}</div>`;
  }
  return h;
@@ -500,25 +676,18 @@ function validPw(a,b){
 function act(a,el){
  const id=el&&el.dataset.id,i=el&&+el.dataset.i;
  switch(a){
-  case'login':{
-   const u=document.getElementById('lid').value.trim(),p=document.getElementById('lpw').value;
-   const acc=accounts.find(x=>x.id===u&&x.pw===p);
-   if(!acc){addLog(null,false,u||'(빈 값)');save();loginErr='아이디 또는 비밀번호가 올바르지 않습니다.';render();return}
-   addLog(acc,true);user=acc;loginErr='';pwErr='';tab='assign';
-   try{localStorage.setItem(K+'_user',acc.id)}catch(e){}
-   break}
+  case'login':doLogin();return;
   case'logout':user=null;pwErr='';try{localStorage.removeItem(K+'_user')}catch(e){}render();return;
-  case'pwforce':{
-   const a1=document.getElementById('fp1').value,a2=document.getElementById('fp2').value;
-   let e=validPw(a1,a2);
-   if(!e&&a1===user.pw)e='이전 비밀번호와 다른 비밀번호를 입력하세요.';
-   if(e){pwErr=e;render();return}
-   user.pw=a1;user.mustChange=false;pwErr='';toast('비밀번호가 변경되었습니다');break}
-  case'pwself':{
-   const c0=document.getElementById('cp0').value,a1=document.getElementById('cp1').value,a2=document.getElementById('cp2').value;
-   if(c0!==user.pw){toast('현재 비밀번호가 올바르지 않습니다');return}
-   const e=validPw(a1,a2);if(e){toast(e);return}
-   user.pw=a1;toast('비밀번호가 변경되었습니다');break}
+  case'pwforce':doPwForce();return;
+  case'pwself':doPwSelf();return;
+  case'tcfg':showCfg=!showCfg;render();return;
+  case'ssave':syncSaveCfg();return;
+  case'stest':syncTest();return;
+  case'spull':syncForcePull();return;
+  case'spush':syncForcePush();return;
+  case'slogs':syncLoadLogs();return;
+  case'asave':saveAssign();return;
+  case'aload':loadAssign();return;
   case'tab':tab=el.dataset.t;break;
   case'smap':S.shareMap=el.dataset.m;break;
   case'slink':S.shortLink=el.dataset.m==='1';break;
@@ -563,16 +732,10 @@ function act(a,el){
   case'delzone':{
    const z=S.zones[i];if(!z||!confirm(`"${z.name}" 구역을 삭제할까요?`))return;
    S.zones.splice(i,1);S.tz.forEach(t=>{if(t.zid===z.id)t.zid=''});break}
-  case'pwreset':{
-   const a=accounts[i];if(!confirm(`"${a.name}" 계정의 비밀번호를 1234로 초기화할까요?\n다음 로그인 시 변경이 필요합니다.`))return;
-   a.pw='1234';a.mustChange=true;toast('초기화되었습니다');break}
+  case'pwreset':doPwReset(i);return;
   case'delacc':if(!confirm(`"${accounts[i].name}" 계정을 삭제할까요?`))return;accounts.splice(i,1);break;
-  case'addacc':{
-   const n=document.getElementById('na').value.trim(),nm=document.getElementById('nn').value.trim(),p=document.getElementById('np').value.trim();
-   if(!n||!p||!nm){toast('아이디, 이름, 초기 비밀번호를 모두 입력하세요');return}
-   if(accounts.some(x=>x.id===n)){toast('이미 있는 아이디입니다');return}
-   accounts.push({id:n,pw:p,name:nm,role:'user',mustChange:true});break}
-  case'clearlog':if(!confirm('접속 로그를 모두 지울까요?'))return;logs=[];break;
+  case'addacc':doAddAcc();return;
+  case'clearlog':if(!confirm('접속 로그를 모두 지울까요?'))return;logs=[];if(syncOn()&&sync.ready)api({action:'clearlogs'}).catch(()=>{});break;
  }
  save();render();
 }
@@ -607,7 +770,16 @@ document.addEventListener('keydown',e=>{
  const el=e.target.closest('[data-enter]');if(!el)return;
  e.preventDefault();act(el.dataset.enter,el);
 });
-load();render();
+document.addEventListener('visibilitychange',()=>{
+ if(document.hidden||!syncOn()||!sync.ready||Date.now()-sync.lastPull<20000)return;
+ pull().then(()=>{const ae=document.activeElement;if(!ae||!ae.matches('input,select,textarea'))render()});
+});
+(async()=>{
+ load();await migrateAccounts();
+ if(user&&!accounts.find(a=>a.id===user.id))user=null;
+ render();
+ if(syncOn()){await pull();render()}
+})();
 </script>
 </body>
 </html>
